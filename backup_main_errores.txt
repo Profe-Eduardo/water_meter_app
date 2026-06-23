@@ -1,0 +1,524 @@
+import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
+import 'dart:convert';
+import 'package:ota_update/ota_update.dart';
+import 'config_screen.dart';
+
+void main() {
+  runApp(const MiPrimeraApp());
+}
+
+class MiPrimeraApp extends StatelessWidget {
+  const MiPrimeraApp({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      debugShowCheckedModeBanner: false,
+      title: 'Water Meter App',
+      theme: ThemeData(
+        useMaterial3: true,
+        colorScheme: ColorScheme.fromSeed(seedColor: Colors.blue),
+      ),
+      home: const PantallaDeCarga(),
+    );
+  }
+}
+
+// ========================================================
+// 1. PANTALLA DE CARGA (SPLASH) - CON AUTO-ACTUALIZACIÓN
+// ========================================================
+class PantallaDeCarga extends StatefulWidget {
+  const PantallaDeCarga({super.key});
+
+  @override
+  State<PantallaDeCarga> createState() => _PantallaDeCargaState();
+}
+
+class _PantallaDeCargaState extends State<PantallaDeCarga> {
+  // VARIABLES DE CONTROL OTA (Fijada en 1.0.0 para forzar la prueba)
+  final String versionActual = "1.0.0";
+  String mensajeCarga = "Iniciando servicios...";
+  String progresoDescarga = "";
+  bool descargando = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _revisarActualizacionesYProcesar();
+  }
+
+  Future<void> _revisarActualizacionesYProcesar() async {
+    setState(() {
+      mensajeCarga = "Buscando actualizaciones...";
+    });
+
+    // 🕵️‍♂️ DIAGNÓSTICO: Inicio del rastreo
+    debugPrint('=== DIAGNÓSTICO OTA ===');
+    debugPrint('1. Versión asignada en el Celular: "$versionActual"');
+
+    try {
+      final url = Uri.parse(
+        'https://raw.githubusercontent.com/Profe-Eduardo/water_meter_app/main/version.json',
+      );
+
+      debugPrint('2. Intentando conectar por red a: $url');
+      final response = await http.get(url).timeout(const Duration(seconds: 5));
+
+      debugPrint(
+        '3. Código de respuesta HTTP de GitHub: ${response.statusCode}',
+      );
+      debugPrint('4. Contenido crudo del JSON recibido: ${response.body}');
+
+      if (response.statusCode == 200) {
+        final datos = jsonDecode(response.body);
+        String ultimaVersion = datos['version'];
+        String urlApk = datos['url'];
+
+        debugPrint(
+          '5. Comparando: Celular ($versionActual) vs GitHub ($ultimaVersion)',
+        );
+
+        if (ultimaVersion != versionActual) {
+          debugPrint(
+            '6. Resultado: ¡Son diferentes! Debería abrir el diálogo azul ahora.',
+          );
+          if (!mounted) return;
+          _mostrarDialogoActualizacion(urlApk, ultimaVersion);
+          return;
+        } else {
+          debugPrint(
+            '6. Resultado: Son versiones idénticas. No se requiere actualizar.',
+          );
+        }
+      } else {
+        debugPrint('❌ Error: El servidor no devolvió código 200 de éxito.');
+      }
+    } catch (e) {
+      // Atrapa errores de timeout, certificados SSL o caídas de internet
+      debugPrint('❌ El proceso de verificación falló por completo: $e');
+    }
+
+    debugPrint('7. Pasando directo al tablero principal de la app.');
+    debugPrint('=======================');
+    _avanzarAlTablero();
+  }
+
+  void _mostrarDialogoActualizacion(String urlApk, String nuevaVersion) {
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (BuildContext dialogContext) {
+        return AlertDialog(
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(15),
+          ),
+          title: const Row(
+            children: [
+              Icon(Icons.system_update, color: Colors.blue),
+              SizedBox(width: 10),
+              Text('Actualización Disponible'),
+            ],
+          ),
+          content: Text(
+            'Hay una nueva versión disponible ($nuevaVersion).\n\n¿Deseas descargarla e instalarla ahora mismo?',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () {
+                Navigator.of(dialogContext).pop();
+                _avanzarAlTablero();
+              },
+              child: const Text(
+                'Más tarde',
+                style: TextStyle(color: Colors.grey),
+              ),
+            ),
+            ElevatedButton(
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.blue.shade800,
+                foregroundColor: Colors.white,
+              ),
+              onPressed: () {
+                Navigator.of(dialogContext).pop();
+                _ejecutarDescargaOTA(urlApk);
+              },
+              child: const Text('Actualizar ya'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  void _ejecutarDescargaOTA(String urlApk) {
+    setState(() {
+      descargando = true;
+      mensajeCarga = "Descargando nueva versión...";
+      progresoDescarga = "0%";
+    });
+
+    debugPrint('=== INICIANDO DESCARGA OTA ===');
+    debugPrint('Descargando APK desde: $urlApk');
+
+    try {
+      OtaUpdate()
+          .execute(
+            urlApk,
+          ) // MODIFICADO: Dejamos que Android maneje la ruta temporal nativa libremente
+          .listen((OtaEvent event) {
+            setState(() {
+              if (event.status == OtaStatus.DOWNLOADING) {
+                progresoDescarga = "${event.value}%";
+                debugPrint('Progreso: ${event.value}%');
+              } else if (event.status == OtaStatus.INSTALLING) {
+                mensajeCarga = "Abriendo instalador...";
+                progresoDescarga = "";
+                debugPrint(
+                  'Estado: Abriendo el instalador nativo de Android...',
+                );
+              } else if (event.status == OtaStatus.INTERNAL_ERROR ||
+                  event.status == OtaStatus.DOWNLOAD_ERROR) {
+                debugPrint(
+                  '❌ Error nativo de OtaUpdate. Código de estado: ${event.status}',
+                );
+                descargando = false;
+                _avanzarAlTablero();
+              }
+            });
+          });
+    } catch (e) {
+      debugPrint('❌ Falló la ejecución del plugin OTA: $e');
+      _avanzarAlTablero();
+    }
+  }
+
+  void _avanzarAlTablero() {
+    if (!mounted) return;
+    setState(() {
+      mensajeCarga = "Cargando tablero...";
+      descargando = false;
+    });
+
+    Future.delayed(const Duration(seconds: 1), () {
+      if (!mounted) return;
+      Navigator.pushReplacement(
+        context,
+        MaterialPageRoute(
+          builder: (context) => const TableroPrincipal(litrosIniciales: 0.0),
+        ),
+      );
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: Container(
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+            colors: [
+              Colors.blue.shade900,
+              Colors.blue.shade600,
+              Colors.blue.shade400,
+            ],
+          ),
+        ),
+        child: Center(
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              const Icon(Icons.water_drop, size: 120, color: Colors.white),
+              const SizedBox(height: 20),
+              const Text(
+                'WATER METER',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 28,
+                  fontWeight: FontWeight.bold,
+                  letterSpacing: 2,
+                ),
+              ),
+              const SizedBox(height: 12),
+              Text(
+                mensajeCarga,
+                style: const TextStyle(
+                  color: Colors.white70,
+                  fontSize: 16,
+                  fontStyle: FontStyle.italic,
+                ),
+              ),
+              const SizedBox(height: 4),
+              Text(
+                'v$versionActual',
+                style: TextStyle(
+                  color: Colors.white.withOpacity(0.5),
+                  fontSize: 13,
+                  fontWeight: FontWeight.w400,
+                ),
+              ),
+              if (descargando) ...[
+                const SizedBox(height: 8),
+                Text(
+                  progresoDescarga,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 22,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ],
+              const SizedBox(height: 40),
+              const CircularProgressIndicator(color: Colors.white),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// ========================================================
+// 2. EL TABLERO PRINCIPAL (DASHBOARD)
+// ========================================================
+class TableroPrincipal extends StatefulWidget {
+  final double litrosIniciales;
+  const TableroPrincipal({super.key, required this.litrosIniciales});
+
+  @override
+  State<TableroPrincipal> createState() => _TableroPrincipalState();
+}
+
+class _TableroPrincipalState extends State<TableroPrincipal> {
+  late double litrosConsumidos;
+  String estadoSensor = "Conectado";
+
+  @override
+  void initState() {
+    super.initState();
+    litrosConsumidos = widget.litrosIniciales;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Colors.grey.shade100,
+      appBar: AppBar(
+        title: const Text(
+          'Monitoreo en Vivo',
+          style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+        ),
+        backgroundColor: Colors.blue.shade800,
+        centerTitle: true,
+        elevation: 0,
+        automaticallyImplyLeading: false,
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.settings, color: Colors.white),
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(builder: (context) => const ConfigScreen()),
+              );
+            },
+          ),
+        ],
+      ),
+      body: SingleChildScrollView(
+        padding: const EdgeInsets.all(16.0),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Card(
+              elevation: 2,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(15),
+              ),
+              child: Padding(
+                padding: const EdgeInsets.all(16.0),
+                child: Row(
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.all(8),
+                      decoration: BoxDecoration(
+                        color: Colors.green.shade50,
+                        shape: BoxShape.circle,
+                      ),
+                      child: const Icon(
+                        Icons.sensors,
+                        size: 30,
+                        color: Colors.green,
+                      ),
+                    ),
+                    const SizedBox(width: 16),
+                    Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text(
+                          'Dispositivo: ESP32_Server',
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: Colors.grey,
+                            fontWeight: FontWeight.w500,
+                          ),
+                        ),
+                        Text(
+                          'Estado: $estadoSensor',
+                          style: const TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.bold,
+                            color: Colors.green,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(height: 12),
+            Card(
+              elevation: 4,
+              shadowColor: Colors.blue.shade100,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(20),
+              ),
+              child: Container(
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(20),
+                  gradient: LinearGradient(
+                    begin: Alignment.topLeft,
+                    end: Alignment.bottomRight,
+                    colors: [Colors.white, Colors.blue.shade50],
+                  ),
+                ),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(
+                    vertical: 24.0,
+                    horizontal: 16.0,
+                  ),
+                  child: Column(
+                    children: [
+                      const Icon(Icons.waves, size: 50, color: Colors.blue),
+                      const SizedBox(height: 8),
+                      Text(
+                        'CONSUMO ACUMULADO',
+                        style: TextStyle(
+                          fontSize: 14,
+                          fontWeight: FontWeight.bold,
+                          color: Colors.blue.shade900,
+                          letterSpacing: 0.5,
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      Text(
+                        '${litrosConsumidos.toStringAsFixed(1)} L',
+                        style: TextStyle(
+                          fontSize: 44,
+                          fontWeight: FontWeight.bold,
+                          color: Colors.blue.shade900,
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      Text(
+                        'Base inicial física: ${widget.litrosIniciales.toStringAsFixed(1)} L',
+                        style: const TextStyle(
+                          fontSize: 12,
+                          color: Colors.grey,
+                          fontStyle: FontStyle.italic,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(height: 20),
+            const Text(
+              ' Métricas del Día',
+              style: TextStyle(
+                fontSize: 16,
+                fontWeight: FontWeight.bold,
+                color: Colors.black87,
+              ),
+            ),
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                Expanded(
+                  child: _buildStatCard(
+                    'Consumo Hoy',
+                    '15.4 L',
+                    Icons.today,
+                    Colors.blue,
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: _buildStatCard(
+                    'Flujo Promedio',
+                    '4.2 L/m',
+                    Icons.speed,
+                    Colors.orange,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 28),
+            ElevatedButton.icon(
+              onPressed: () {
+                setState(() {
+                  litrosConsumidos += 1.5;
+                });
+              },
+              icon: const Icon(Icons.add_circle_outline, size: 22),
+              label: const Text('Simular Pulso de Agua (+1.5L)'),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.blue.shade800,
+                foregroundColor: Colors.white,
+                padding: const EdgeInsets.symmetric(vertical: 16),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                elevation: 2,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildStatCard(
+    String title,
+    String value,
+    IconData icon,
+    Color color,
+  ) {
+    return Card(
+      elevation: 1.5,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      child: Padding(
+        padding: const EdgeInsets.all(12.0),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Icon(icon, size: 24, color: color),
+            const SizedBox(height: 8),
+            Text(
+              title,
+              style: const TextStyle(fontSize: 12, color: Colors.grey),
+            ),
+            const SizedBox(height: 2),
+            Text(
+              value,
+              style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}

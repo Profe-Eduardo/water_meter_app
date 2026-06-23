@@ -7,24 +7,22 @@
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
-
-import 'package:primera_app/main.dart';
+import 'package:primera_app/main.dart'; // Asegúrate de que este nombre coincida con tu proyecto
 
 void main() {
-  testWidgets('Counter increments smoke test', (WidgetTester tester) async {
-    // Build our app and trigger a frame.
-    await tester.pumpWidget(const MyApp());
+  testWidgets('Prueba de humo: Carga inicial de Water Meter', (
+    WidgetTester tester,
+  ) async {
+    // 1. Construye nuestra aplicación y dispara el primer cuadro (frame).
+    await tester.pumpWidget(const MiPrimeraApp());
 
-    // Verify that our counter starts at 0.
-    expect(find.text('0'), findsOneWidget);
-    expect(find.text('1'), findsNothing);
+    // 2. Verifica que el título de la pantalla de carga (Splash) aparezca en pantalla.
+    expect(find.text('WATER METER'), findsOneWidget);
 
-    // Tap the '+' icon and trigger a frame.
-    await tester.tap(find.byIcon(Icons.add));
-    await tester.pump();
+    // 3. Verifica que inicie buscando actualizaciones.
+    expect(find.text('Buscando actualizaciones...'), findsOneWidget);
 
-    // Verify that our counter has incremented.
-    expect(find.text('0'), findsNothing);
-    expect(find.text('1'), findsOneWidget);
+    // 4. Verifica que pinte el indicador de progreso circular.
+    expect(find.byType(CircularProgressIndicator), findsOneWidget);
   });
 }

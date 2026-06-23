@@ -1,0 +1,121 @@
+#include <WiFi.h>
+#include <WiFiUdp.h>
+#include <WebServer.h>
+#include <Wire.h> 
+#include <LiquidCrystal_I2C.h>
+#include <ArduinoJson.h> // 🚀 NUEVO: Librería para estructurar el JSON
+
+const byte pinReed = 2;
+const unsigned long rebote = 50; 
+const float litrosPorPulso = 1.0; 
+ 
+LiquidCrystal_I2C lcd(0x27, 16, 2); 
+ 
+const char* ap_ssid = "HydroLogic_Config";
+const int udpPort = 4210;
+ 
+volatile unsigned long pulsos = 0;
+volatile unsigned long ultimoPulso = 0;
+volatile bool huboMovimiento = false; 
+
+float consumo_litros = 0.0;
+bool modoMedicion = false; 
+ 
+WiFiUDP udp;
+WebServer server(80);
+ 
+void IRAM_ATTR contarPulso() {
+  unsigned long ahora = millis();
+  if (ahora - ultimoPulso > rebote) {
+    pulsos++;
+    ultimoPulso = ahora;
+    huboMovimiento = true; 
+  }
+}
+
+// 🚀 NUEVA FUNCIÓN: Envía las lecturas reales a Flutter en formato JSON
+void handleDatos() {
+  StaticJsonDocument<200> doc;
+  
+  // Llenamos el JSON con los nombres exactos que tu Dashboard espera
+  doc["conectado"] = true;
+  doc["litros_totales"] = consumo_litros;
+  doc["pulsos"] = pulsos;
+  
+  // Calculamos una estimación de flujo rápida: si no hay movimiento es 0, si hay, puedes calcularlo o dejarlo referencial
+  doc["flujo_por_minuto"] = huboMovimiento ? 4.5 : 0.0; 
+
+  String respuestaJson;
+  serializeJson(doc, respuestaJson);
+
+  // Enviamos la respuesta HTTP con la cabecera adecuada
+  server.send(200, "application/json", respuestaJson);
+}
+ 
+void handleConfig() {
+  if (server.hasArg("ssid") && server.hasArg("pass")) {
+    String s = server.arg("ssid");
+    String p = server.arg("pass");
+    WiFi.begin(s.c_str(), p.c_str());
+    server.send(200, "text/plain", "Conectando...");
+     
+    int i = 0;
+    while (WiFi.status() != WL_CONNECTED && i < 20) { delay(500); i++; }
+ 
+    if (WiFi.status() == WL_CONNECTED) {
+      lcd.clear();
+      lcd.print("CONECTADO!");
+      delay(2000);
+      lcd.clear();
+      lcd.setCursor(0, 0);
+      lcd.print("ESPERANDO FLUJO");
+      modoMedicion = true;
+    }
+  }
+}
+ 
+void setup() {
+  lcd.init();
+  lcd.backlight();
+  pinMode(pinReed, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(pinReed), contarPulso, FALLING);
+ 
+  WiFi.softAP(ap_ssid);
+  
+  // 🚀 REGISTRO DE RUTAS
+  server.on("/config_wifi", HTTP_POST, handleConfig);
+  server.on("/datos", HTTP_GET, handleDatos); // <-- Nueva ruta para la App de Flutter
+  
+  server.begin();
+ 
+  lcd.setCursor(0,0);
+  lcd.print("MODO CONFIG:");
+  lcd.setCursor(0,1);
+  lcd.print("ACTIVO (AP)");
+}
+ 
+void loop() {
+  server.handleClient();
+ 
+  if (modoMedicion && huboMovimiento) {
+     
+    consumo_litros = pulsos * litrosPorPulso;
+ 
+    // 1. ACTUALIZAR PANTALLA
+    lcd.setCursor(0, 0);
+    lcd.print("CONSUMO:        "); 
+    lcd.setCursor(0, 1);
+    lcd.print(String(consumo_litros, 2) + " L       "); 
+ 
+    // 2. ENVIAR UDP
+    if (WiFi.status() == WL_CONNECTED) {
+      IPAddress ip = WiFi.localIP();
+      ip[3] = 255; 
+      udp.beginPacket(ip, udpPort);
+      udp.print("VAL:" + String(consumo_litros, 2));
+      udp.endPacket();
+    }
+ 
+    huboMovimiento = false; 
+  }
+}

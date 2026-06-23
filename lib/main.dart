@@ -1,5 +1,10 @@
 import 'package:flutter/material.dart';
-import 'config_screen.dart'; // Importamos la pantalla de internet
+import 'package:http/http.dart' as http;
+import 'dart:convert';
+import 'dart:async'; // 🚀 Requerido para el manejo del Timer periódico
+import 'config_screen.dart';
+import 'alerta_conexion.dart'; // Importamos tu widget modular
+import 'splash_screen.dart'; // 🚀 Importamos la nueva ubicación de la pantalla de carga
 
 void main() {
   runApp(const MiPrimeraApp());
@@ -17,168 +22,8 @@ class MiPrimeraApp extends StatelessWidget {
         useMaterial3: true,
         colorScheme: ColorScheme.fromSeed(seedColor: Colors.blue),
       ),
-      home: const PantallaDeCarga(),
-    );
-  }
-}
-
-// ========================================================
-// 1. PANTALLA DE CARGA (SPLASH) - DEGRADADO AZUL
-// ========================================================
-class PantallaDeCarga extends StatefulWidget {
-  const PantallaDeCarga({super.key});
-
-  @override
-  State<PantallaDeCarga> createState() => _PantallaDeCargaState();
-}
-
-class _PantallaDeCargaState extends State<PantallaDeCarga> {
-  final TextEditingController _lecturaController = TextEditingController();
-
-  @override
-  void initState() {
-    super.initState();
-    _verificarRutaInicial();
-  }
-
-  @override
-  void dispose() {
-    _lecturaController.dispose();
-    super.dispose();
-  }
-
-  void _verificarRutaInicial() {
-    Future.delayed(const Duration(seconds: 3), () {
-      if (!mounted) return;
-
-      // true  -> Configurar Internet (config_screen.dart)
-      // false -> Pide lectura inicial aquí y va al tablero
-      bool esPrimeraVez = false;
-
-      if (esPrimeraVez) {
-        Navigator.pushReplacement(
-          context,
-          MaterialPageRoute(builder: (context) => const ConfigScreen()),
-        );
-      } else {
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          _mostrarDialogoLecturaInicial();
-        });
-      }
-    });
-  }
-
-  void _mostrarDialogoLecturaInicial() {
-    showDialog(
-      context: context,
-      barrierDismissible: false,
-      builder: (BuildContext dialogContext) {
-        return AlertDialog(
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(15),
-          ),
-          title: const Row(
-            children: [
-              Icon(Icons.speed, color: Colors.blue),
-              SizedBox(width: 10),
-              Text('Lectura Inicial'),
-            ],
-          ),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Text(
-                'Ingresa el valor actual de tu medidor físico:',
-                style: TextStyle(fontSize: 14, color: Colors.grey),
-              ),
-              const SizedBox(height: 20),
-              TextField(
-                controller: _lecturaController,
-                keyboardType: const TextInputType.numberWithOptions(
-                  decimal: true,
-                ),
-                autofocus: true,
-                decoration: const InputDecoration(
-                  labelText: 'Litros Iniciales',
-                  border: OutlineInputBorder(),
-                  suffixText: 'L',
-                ),
-              ),
-            ],
-          ),
-          actions: [
-            ElevatedButton(
-              style: ElevatedButton.styleFrom(
-                backgroundColor: Colors.blue.shade800,
-                foregroundColor: Colors.white,
-              ),
-              onPressed: () {
-                double lectura =
-                    double.tryParse(_lecturaController.text) ?? 0.0;
-                Navigator.of(dialogContext).pop();
-
-                Navigator.pushReplacement(
-                  context,
-                  MaterialPageRoute(
-                    builder: (context) =>
-                        TableroPrincipal(litrosIniciales: lectura),
-                  ),
-                );
-              },
-              child: const Text('Iniciar Tablero'),
-            ),
-          ],
-        );
-      },
-    );
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      body: Container(
-        decoration: BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment.topCenter,
-            end: Alignment.bottomCenter,
-            colors: [
-              Colors.blue.shade900,
-              Colors.blue.shade600,
-              Colors.blue.shade400,
-            ],
-          ),
-        ),
-        child: const Center(
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Icon(Icons.water_drop, size: 120, color: Colors.white),
-              SizedBox(height: 20),
-              Text(
-                'WATER METER',
-                style: TextStyle(
-                  color: Colors.white,
-                  fontSize: 28,
-                  fontWeight: FontWeight.bold,
-                  letterSpacing: 2,
-                ),
-              ),
-              SizedBox(height: 12),
-              Text(
-                'Cargando...',
-                style: TextStyle(
-                  color: Colors.white70,
-                  fontSize: 16,
-                  fontStyle: FontStyle.italic,
-                ),
-              ),
-              SizedBox(height: 40),
-              CircularProgressIndicator(color: Colors.white),
-            ],
-          ),
-        ),
-      ),
+      home:
+          const PantallaDeCarga(), // Sigue levantando aquí, pero ahora viene de splash_screen.dart
     );
   }
 }
@@ -196,12 +41,68 @@ class TableroPrincipal extends StatefulWidget {
 
 class _TableroPrincipalState extends State<TableroPrincipal> {
   late double litrosConsumidos;
-  String estadoSensor = "Conectado";
+  double flujoActual = 0.0; // 🚀 NUEVO: Almacena el valor de L/min del ESP32
+
+  String estadoSensor = "Buscando...";
+  bool esConectado = false;
+  Timer? _timerMonitoreo;
+
+  // 🚀 Dirección unificada del endpoint de datos reales en el ESP32
+  final String _esp32Url = 'http://192.168.4.1/datos';
 
   @override
   void initState() {
     super.initState();
     litrosConsumidos = widget.litrosIniciales;
+    _iniciarMonitoreoESP32(); // Lanza el motor en tiempo real
+  }
+
+  @override
+  void dispose() {
+    _timerMonitoreo?.cancel();
+    super.dispose();
+  }
+
+  // 🚀 MOTOR MEJORADO: Consume los datos reales y gestiona el estado de red simultáneamente
+  void _iniciarMonitoreoESP32() {
+    // Bajamos el tiempo a 2 segundos para tener actualizaciones más fluidas del sensor
+    _timerMonitoreo = Timer.periodic(const Duration(seconds: 2), (timer) async {
+      try {
+        final response = await http.get(Uri.parse(_esp32Url)).timeout(
+              const Duration(
+                seconds: 2,
+              ), // Timeout ajustado para desconexión rápida
+            );
+
+        if (response.statusCode == 200) {
+          final datos = jsonDecode(response.body);
+          if (!mounted) return;
+          setState(() {
+            esConectado = true;
+            estadoSensor = "Conectado";
+            // Acumulamos la lectura del sensor sobre la base inicial de calibración de la app
+            litrosConsumidos = widget.litrosIniciales +
+                (datos['litros_totales'] as num).toDouble();
+            flujoActual = (datos['flujo_por_minuto'] as num).toDouble();
+          });
+        } else {
+          _marcarDesconectado();
+        }
+      } catch (e) {
+        _marcarDesconectado();
+      }
+    });
+  }
+
+  void _marcarDesconectado() {
+    if (!mounted) return;
+    if (esConectado != false) {
+      setState(() {
+        esConectado = false;
+        estadoSensor = "Desconectado";
+        flujoActual = 0.0; // Si no hay red, la velocidad cae a cero
+      });
+    }
   }
 
   @override
@@ -213,17 +114,27 @@ class _TableroPrincipalState extends State<TableroPrincipal> {
           'Monitoreo en Vivo',
           style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
         ),
-        backgroundColor: Colors.blue.shade800,
+        backgroundColor: esConectado
+            ? Colors.blue.shade800
+            : Colors.blueGrey, // Dinámico según red
         centerTitle: true,
         elevation: 0,
+        automaticallyImplyLeading: false,
         actions: [
           IconButton(
             icon: const Icon(Icons.settings, color: Colors.white),
-            onPressed: () {
-              Navigator.push(
+            onPressed: () async {
+              final resultado = await Navigator.push<double>(
                 context,
                 MaterialPageRoute(builder: (context) => const ConfigScreen()),
               );
+
+              if (resultado != null) {
+                setState(() {
+                  litrosConsumidos = resultado;
+                });
+                debugPrint('Tablero actualizado con la lectura: $resultado L');
+              }
             },
           ),
         ],
@@ -233,7 +144,9 @@ class _TableroPrincipalState extends State<TableroPrincipal> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            // TARJETA DE ESTADO DEL SENSOR
+            AlertaConexion(visible: !esConectado),
+
+            // Tarjeta de estado del dispositivo
             Card(
               elevation: 2,
               shape: RoundedRectangleBorder(
@@ -246,13 +159,15 @@ class _TableroPrincipalState extends State<TableroPrincipal> {
                     Container(
                       padding: const EdgeInsets.all(8),
                       decoration: BoxDecoration(
-                        color: Colors.green.shade50,
+                        color: esConectado
+                            ? Colors.green.shade50
+                            : Colors.red.shade50,
                         shape: BoxShape.circle,
                       ),
-                      child: const Icon(
-                        Icons.sensors,
+                      child: Icon(
+                        esConectado ? Icons.sensors : Icons.sensors_off,
                         size: 30,
-                        color: Colors.green,
+                        color: esConectado ? Colors.green : Colors.red,
                       ),
                     ),
                     const SizedBox(width: 16),
@@ -269,10 +184,10 @@ class _TableroPrincipalState extends State<TableroPrincipal> {
                         ),
                         Text(
                           'Estado: $estadoSensor',
-                          style: const TextStyle(
+                          style: TextStyle(
                             fontSize: 16,
                             fontWeight: FontWeight.bold,
-                            color: Colors.green,
+                            color: esConectado ? Colors.green : Colors.red,
                           ),
                         ),
                       ],
@@ -283,7 +198,7 @@ class _TableroPrincipalState extends State<TableroPrincipal> {
             ),
             const SizedBox(height: 12),
 
-            // TARJETA PRINCIPAL DE CONSUMO TOTAL
+            // Tarjeta de consumo acumulado (Datos reales de red)
             Card(
               elevation: 4,
               shadowColor: Colors.blue.shade100,
@@ -341,14 +256,14 @@ class _TableroPrincipalState extends State<TableroPrincipal> {
               ),
             ),
             const SizedBox(height: 20),
-
-            // SECCIÓN DE MÉTRICAS DEL DÍA (CORREGIDA CON BLACK87)
-            const Text(
-              ' Métricas del Día',
-              style: TextStyle(
-                fontSize: 16,
-                fontWeight: FontWeight.bold,
-                color: Colors.black87,
+            const Center(
+              child: Text(
+                'Métricas del Día',
+                style: TextStyle(
+                  fontSize: 16,
+                  fontWeight: FontWeight.bold,
+                  color: Colors.black87,
+                ),
               ),
             ),
             const SizedBox(height: 8),
@@ -357,7 +272,7 @@ class _TableroPrincipalState extends State<TableroPrincipal> {
                 Expanded(
                   child: _buildStatCard(
                     'Consumo Hoy',
-                    '15.4 L',
+                    '${litrosConsumidos.toStringAsFixed(1)} L', // Muestra el total real en vivo
                     Icons.today,
                     Colors.blue,
                   ),
@@ -365,34 +280,74 @@ class _TableroPrincipalState extends State<TableroPrincipal> {
                 const SizedBox(width: 12),
                 Expanded(
                   child: _buildStatCard(
-                    'Flujo Promedio',
-                    '4.2 L/m',
+                    'Flujo Real',
+                    '${flujoActual.toStringAsFixed(1)} L/m', // 🚀 NUEVO: Vinculado al flujo del ESP32
                     Icons.speed,
-                    Colors.orange,
+                    flujoActual > 0 ? Colors.green : Colors.orange,
                   ),
                 ),
               ],
             ),
             const SizedBox(height: 28),
 
-            // BOTÓN DE SIMULACIÓN DE FLUJO
-            ElevatedButton.icon(
-              onPressed: () {
-                setState(() {
-                  litrosConsumidos += 1.5;
-                });
-              },
-              icon: const Icon(Icons.add_circle_outline, size: 22),
-              label: const Text('Simular Pulso de Agua (+1.5L)'),
-              style: ElevatedButton.styleFrom(
-                backgroundColor: Colors.blue.shade800,
-                foregroundColor: Colors.white,
-                padding: const EdgeInsets.symmetric(vertical: 16),
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(12),
+            // SECCIÓN DE SIMULADORES / INTERRUPTORES DE PRUEBA
+            Row(
+              children: [
+                // Simulación manual local de pulso
+                Expanded(
+                  child: ElevatedButton.icon(
+                    onPressed: () {
+                      setState(() {
+                        litrosConsumidos += 1.5;
+                      });
+                    },
+                    icon: const Icon(Icons.add_circle_outline, size: 18),
+                    label: const Text(
+                      'Pulso (+1.5L)',
+                      style: TextStyle(fontSize: 12),
+                    ),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.blue.shade800,
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(vertical: 14),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                    ),
+                  ),
                 ),
-                elevation: 2,
-              ),
+                const SizedBox(width: 8),
+                // Botón interactivo para alternar estados si pruebas sin el chip
+                Expanded(
+                  child: ElevatedButton.icon(
+                    onPressed: () {
+                      setState(() {
+                        esConectado = !esConectado;
+                        estadoSensor =
+                            esConectado ? "Conectado" : "Desconectado";
+                      });
+                    },
+                    icon: Icon(
+                      esConectado ? Icons.wifi_off : Icons.wifi,
+                      size: 18,
+                    ),
+                    label: Text(
+                      esConectado ? 'Forzar Alerta' : 'Restaurar Red',
+                      style: const TextStyle(fontSize: 12),
+                    ),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: esConectado
+                          ? Colors.red.shade800
+                          : Colors.green.shade800,
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(vertical: 14),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                    ),
+                  ),
+                ),
+              ],
             ),
           ],
         ),
